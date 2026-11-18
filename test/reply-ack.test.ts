@@ -25,6 +25,8 @@ class FakePush {
 }
 
 class FakeChannel {
+  joinPush = new FakePush();
+  pushes: FakePush[] = [];
   lastPush: FakePush | null = null;
   lastEvent: string | null = null;
   lastPayload: unknown = null;
@@ -39,10 +41,11 @@ class FakeChannel {
     this.lastPayload = payload;
     this.lastTimeout = timeout;
     this.lastPush = new FakePush();
+    this.pushes.push(this.lastPush);
     return this.lastPush;
   }
   join(): FakePush {
-    return new FakePush();
+    return this.joinPush;
   }
   leave(): void {}
 }
@@ -58,8 +61,11 @@ class FakeSocket {
     this.lastChannel = new FakeChannel(topic, params);
     return this.lastChannel;
   }
+  closeCb: ((e?: unknown) => void) | null = null;
   onOpen(): void {}
-  onClose(): void {}
+  onClose(cb: (e?: unknown) => void): void {
+    this.closeCb = cb;
+  }
   onError(): void {}
   onMessage(): void {}
   isConnected(): boolean {
@@ -85,6 +91,7 @@ function makeClient() {
       token: "test-token",
       reconnectIntervalMs: 1_000_000,
       maxReconnectIntervalMs: 1_000_000,
+      replyJoinWaitMs: 20,
     },
     { onAttention: () => {}, onDisconnect: () => {} },
   );
@@ -147,7 +154,68 @@ describe("sendReply awaits the server ack", () => {
   });
 });
 
+describe("a reply is never reported as sent without a message row (2026-11-18 lost reply)", () => {
+  test("an 'ok' ack with NO message_id rejects instead of resolving", async () => {
+    const { client, channel } = joinedClient();
+    const promise = client.sendReply(SPACE, "hello");
+    channel.lastPush!.trigger("ok", {});
+    await expect(promise).rejects.toThrow(/without a message_id/);
+    client.disconnect();
+  });
+
+  test("a socket close unjoins the channel, so the next reply is not pushed into the dead connection", async () => {
+    const { client, channel } = joinedClient();
+    client.socket.closeCb?.({ code: 1006 });
+    expect(client.channelJoined).toBe(false);
+    const before = channel.pushes.length;
+    await expect(client.sendReply(SPACE, "hello")).rejects.toThrow(/not connected to Burrow/);
+    expect(channel.pushes.length).toBe(before);
+    client.disconnect();
+  });
+
+  test("a reply issued mid-rejoin waits for the join and is then pushed and acked", async () => {
+    const client: any = new SuiteClient(
+      {
+        url: "ws://localhost/socket",
+        runtimeId: "test-runtime",
+        token: "test-token",
+        reconnectIntervalMs: 1_000_000,
+        maxReconnectIntervalMs: 1_000_000,
+        replyJoinWaitMs: 5_000,
+      },
+      { onAttention: () => {}, onDisconnect: () => {} },
+    );
+    client.connect();
+    const channel = client.socket.lastChannel as FakeChannel;
+    const promise = client.sendReply(SPACE, "hello");
+    expect(channel.pushes.length).toBe(0);
+
+    channel.joinPush.trigger("ok");
+    await Promise.resolve();
+    expect(channel.lastEvent).toBe("reply");
+    channel.lastPush!.trigger("ok", { message_id: "msg-after-join" });
+
+    await expect(promise).resolves.toMatchObject({ message_id: "msg-after-join" });
+    client.disconnect();
+  });
+});
+
 describe("replyResult maps the ack onto an MCP tool result", () => {
+  test("an ack with no message_id is an error that says NOT POSTED, never 'sent'", async () => {
+    const result = await replyResult(() => Promise.resolve({}), SPACE, "hello");
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toMatch(/^NOT POSTED/);
+    expect(result.content[0]!.text).not.toContain("sent (");
+  });
+
+  test("a timeout is reported as NOT POSTED with retry advice", async () => {
+    const err = Object.assign(new Error("timed out after 10000ms"), { recoverable: true });
+    const result = await replyResult(() => Promise.reject(err), SPACE, "hello");
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toMatch(/^NOT POSTED/);
+    expect(result.content[0]!.text).toContain("Retry");
+  });
+
   test("a rejection produces isError with the server's own error text, the space_id, and recoverable: false", async () => {
     const err = new Error(
       `Access denied: agent is not a participant in space ${SPACE}`,
@@ -174,7 +242,7 @@ describe("replyResult maps the ack onto an MCP tool result", () => {
     );
 
     expect(result.isError).toBeUndefined();
-    expect(result.content[0]!.text).toContain("msg-456");
+    expect(result.content[0]!.text).toBe("sent (message_id msg-456)");
   });
 
   test("the reply_chunk finalizer keeps its own prefix while still surfacing the receipt", async () => {

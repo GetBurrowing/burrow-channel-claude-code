@@ -83,6 +83,11 @@ export interface SuiteConfig {
   token: string;
   reconnectIntervalMs?: number;
   maxReconnectIntervalMs?: number;
+  /**
+   * How long a reply waits for the runtime channel to (re)join before it is
+   * reported as NOT posted. Default `REPLY_JOIN_WAIT_MS`.
+   */
+  replyJoinWaitMs?: number;
 }
 
 export interface AttentionPayload {
@@ -195,6 +200,12 @@ const STALE_TRAFFIC_MS = 120_000;
 // server cannot leave an MCP tool call awaiting forever.
 const PUSH_TIMEOUT_MS = 10_000;
 
+// A reply issued while the channel is mid-rejoin (socket drop, watchdog
+// reconnect) waits this long for the join instead of failing at once. Longer
+// than one backoff step at the low end, short enough that a dead connection
+// still answers the tool call well inside a turn.
+const REPLY_JOIN_WAIT_MS = 15_000;
+
 /** Server payload for a refused `reply` push (core runtime_channel.ex). */
 export interface ReplyError {
   error?: string;
@@ -274,6 +285,8 @@ export class SuiteClient {
   private lastTrafficAt = Date.now();
   private stopped = false;
   private recentMessageIds = new Set<string>();
+  // Replies waiting for the channel to (re)join. Resolved by `markJoined`.
+  private joinWaiters = new Set<() => void>();
 
   constructor(
     private readonly config: SuiteConfig,
@@ -309,6 +322,7 @@ export class SuiteClient {
       reconnectAfterMs: () => 999_999_999, // we handle reconnect ourselves
     });
 
+    const socket = this.socket;
     this.lastTrafficAt = Date.now();
     log(`connecting to ${this.config.url} (attempt ${this.reconnectAttempts + 1})`);
 
@@ -318,6 +332,12 @@ export class SuiteClient {
     });
 
     this.socket.onClose((event: any) => {
+      // A closed socket means the channel cannot carry a push, whatever the
+      // last join said. Leaving this true is how a reply was pushed into a
+      // dead connection and buffered until the reconnect threw it away.
+      // Identity guard: `connect()` disconnects the PREVIOUS socket, whose
+      // close can land after the new channel has joined.
+      if (this.socket === socket) this.channelJoined = false;
       if (!this.stopped) {
         log(`socket closed (code=${event?.code ?? "?"} reason=${event?.reason || "n/a"})`);
         this.handlers.onDisconnect();
@@ -326,6 +346,7 @@ export class SuiteClient {
     });
 
     this.socket.onError((err: any) => {
+      if (this.socket === socket) this.channelJoined = false;
       if (!this.stopped) {
         log(`socket error: ${err?.message ?? err}`);
         this.handlers.onDisconnect();
@@ -388,38 +409,114 @@ export class SuiteClient {
    * recoverable: false}}}`; this method surfaces both.
    */
   sendReply(spaceId: string, content: string, extras?: ReplyExtras): Promise<ReplyOk> {
-    const channel = this.channel;
-    if (!channel || !this.channelJoined) {
-      return Promise.reject(
-        new Error(
-          `not connected to Burrow: the runtime channel is not joined, so the reply to space ${spaceId} was not delivered`,
-        ),
-      );
-    }
+    return this.pushAcked("reply", spaceId, {
+      space_id: spaceId,
+      content,
+      ...replyExtrasPayload(extras),
+    });
+  }
 
+  /**
+   * Push a persisted-message event and resolve ONLY on the server's ack that
+   * names the created message.
+   *
+   * Three ways this used to report success without a message row, all closed:
+   *   - fire-and-forget push (pre 01a09415): any refusal read as "sent";
+   *   - an `ok` ack with no `message_id`: there is no proof a row exists, so it
+   *     is now a rejection, not "sent (no message_id returned)";
+   *   - a push on a channel whose socket had dropped: `channelJoined` stayed
+   *     true until the reconnect timer fired, so the push went into phoenix's
+   *     buffer on a channel `connect()` was about to discard. The flag now
+   *     clears on socket close/error, and an unjoined channel is WAITED on
+   *     (up to `replyJoinWaitMs`) rather than pushed into or failed blindly.
+   */
+  private pushAcked(
+    event: "reply" | "reply_with_media",
+    spaceId: string,
+    payload: Record<string, unknown>,
+  ): Promise<ReplyOk> {
+    // Fast path stays synchronous: the push is on the wire before this
+    // returns, exactly as before.
+    if (this.channel && this.channelJoined) {
+      return this.pushOn(this.channel, event, spaceId, payload);
+    }
+    return this.whenJoined(spaceId).then((channel) => this.pushOn(channel, event, spaceId, payload));
+  }
+
+  private pushOn(
+    channel: Channel,
+    event: string,
+    spaceId: string,
+    payload: Record<string, unknown>,
+  ): Promise<ReplyOk> {
     return new Promise<ReplyOk>((resolve, reject) => {
       channel
-        .push(
-          "reply",
-          { space_id: spaceId, content, ...replyExtrasPayload(extras) },
-          PUSH_TIMEOUT_MS,
-        )
-        .receive("ok", (payload: ReplyOk) => resolve(payload ?? {}))
-        .receive("error", (payload: ReplyError) => {
+        .push(event, payload, PUSH_TIMEOUT_MS)
+        .receive("ok", (ok: ReplyOk) => {
+          if (typeof ok?.message_id === "string" && ok.message_id.length > 0) {
+            resolve(ok);
+            return;
+          }
           const err = new Error(
-            payload?.error ?? `reply to space ${spaceId} was refused by Burrow`,
+            `Burrow acknowledged the ${event} to space ${spaceId} without a message_id, so there is no proof a message was created`,
           ) as Error & { recoverable?: boolean };
-          err.recoverable = payload?.recoverable ?? false;
+          err.recoverable = true;
           reject(err);
         })
-        .receive("timeout", () =>
-          reject(
-            new Error(
-              `timed out after ${PUSH_TIMEOUT_MS}ms waiting for Burrow to ack the reply to space ${spaceId}`,
-            ),
-          ),
-        );
+        .receive("error", (err: ReplyError) => {
+          const error = new Error(
+            err?.error ?? `reply to space ${spaceId} was refused by Burrow`,
+          ) as Error & { recoverable?: boolean };
+          error.recoverable = err?.recoverable ?? false;
+          reject(error);
+        })
+        .receive("timeout", () => {
+          const error = new Error(
+            `timed out after ${PUSH_TIMEOUT_MS}ms waiting for Burrow to ack the reply to space ${spaceId}`,
+          ) as Error & { recoverable?: boolean };
+          error.recoverable = true;
+          reject(error);
+        });
     });
+  }
+
+  /**
+   * Resolve with the joined channel, waiting up to `replyJoinWaitMs` for a
+   * (re)join in progress. Rejects at once when there is no connection to wait
+   * for (never connected, or `disconnect()`ed).
+   */
+  private whenJoined(spaceId: string): Promise<Channel> {
+    const notJoined = (detail: string) => {
+      const err = new Error(
+        `not connected to Burrow: the runtime channel is not joined (${detail}), so the reply to space ${spaceId} was not delivered`,
+      ) as Error & { recoverable?: boolean };
+      err.recoverable = true;
+      return err;
+    };
+
+    if (!this.socket || this.stopped) {
+      return Promise.reject(notJoined("no connection"));
+    }
+
+    const waitMs = this.config.replyJoinWaitMs ?? REPLY_JOIN_WAIT_MS;
+    return new Promise<Channel>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.joinWaiters.delete(onJoined);
+        reject(notJoined(`waited ${waitMs}ms for a rejoin`));
+      }, waitMs);
+      const onJoined = () => {
+        clearTimeout(timer);
+        this.joinWaiters.delete(onJoined);
+        if (this.channel && this.channelJoined) resolve(this.channel);
+        else reject(notJoined("rejoin did not hold"));
+      };
+      this.joinWaiters.add(onJoined);
+    });
+  }
+
+  private markJoined(): void {
+    this.channelJoined = true;
+    for (const waiter of [...this.joinWaiters]) waiter();
   }
 
   /**
@@ -514,16 +611,7 @@ export class SuiteClient {
     attachments: Array<{ filename: string; contentType: string; data: string }>,
     extras?: ReplyExtras,
   ): Promise<ReplyOk> {
-    const channel = this.channel;
-    if (!channel || !this.channelJoined) {
-      return Promise.reject(
-        new Error(
-          `not connected to Burrow: the runtime channel is not joined, so the reply to space ${spaceId} was not delivered`,
-        ),
-      );
-    }
-
-    const payload = {
+    return this.pushAcked("reply_with_media", spaceId, {
       space_id: spaceId,
       content,
       ...replyExtrasPayload(extras),
@@ -532,26 +620,6 @@ export class SuiteClient {
         content_type: a.contentType,
         data: a.data,
       })),
-    };
-
-    return new Promise<ReplyOk>((resolve, reject) => {
-      channel
-        .push("reply_with_media", payload, PUSH_TIMEOUT_MS)
-        .receive("ok", (ok: ReplyOk) => resolve(ok ?? {}))
-        .receive("error", (err: ReplyError) => {
-          const error = new Error(
-            err?.error ?? `reply to space ${spaceId} was refused by Burrow`,
-          ) as Error & { recoverable?: boolean };
-          error.recoverable = err?.recoverable ?? false;
-          reject(error);
-        })
-        .receive("timeout", () =>
-          reject(
-            new Error(
-              `timed out after ${PUSH_TIMEOUT_MS}ms waiting for Burrow to ack the reply to space ${spaceId}`,
-            ),
-          ),
-        );
     });
   }
 
@@ -634,6 +702,20 @@ export class SuiteClient {
       this.handlers.onPermissionVerdict?.(payload);
     });
 
+    // Channel-level errors (server crash of the channel process, kicked
+    // topic) leave the socket open but the channel unusable until phoenix
+    // rejoins it; the rejoin's "ok" below sets the flag again. Optional calls:
+    // test shims may not implement these.
+    // Identity-guarded: `connect()` leaves the PREVIOUS channel, and that
+    // channel's close must not unjoin its replacement.
+    const channel = this.channel;
+    (channel as any).onError?.(() => {
+      if (this.channel === channel) this.channelJoined = false;
+    });
+    (channel as any).onClose?.(() => {
+      if (this.channel === channel) this.channelJoined = false;
+    });
+
     this.channel
       .join()
       .receive("ok", () => {
@@ -641,7 +723,7 @@ export class SuiteClient {
         // Join success — not socket open — is the real "we're back":
         // reset the backoff here so a flaky join doesn't shrink delays.
         this.reconnectAttempts = 0;
-        this.channelJoined = true;
+        this.markJoined();
         this.lastTrafficAt = Date.now();
       })
       .receive("error", (reason: unknown) => {

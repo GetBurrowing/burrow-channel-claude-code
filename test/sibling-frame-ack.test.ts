@@ -90,6 +90,7 @@ function joinedClient(): { client: any; channel: FakeChannel } {
       token: "test-token",
       reconnectIntervalMs: 1_000_000,
       maxReconnectIntervalMs: 1_000_000,
+      replyJoinWaitMs: 20,
     },
     { onAttention: () => {}, onDisconnect: () => {} },
   );
@@ -132,7 +133,7 @@ describe("sendReplyWithMedia awaits the server ack", () => {
       filename: "a.txt",
       content_type: "text/plain",
     });
-    channel.lastPush!.trigger("ok", {});
+    channel.lastPush!.trigger("ok", { message_id: "msg-media-2" });
     await promise;
     client.disconnect();
   });

@@ -197,7 +197,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
   test("an ack without dropped reads as a plain receipt (positive control)", async () => {
     const { suite } = recordingSuite({ message_id: "msg-9" });
     const result = await callTool(suite, "suite_reply", { space_id: SPACE, content: "hi" });
-    expect(result.content[0]!.text).toBe("message_id msg-9");
+    expect(result.content[0]!.text).toBe("sent (message_id msg-9)");
   });
 
   test("the three reply tools advertise both optional fields and require neither", () => {

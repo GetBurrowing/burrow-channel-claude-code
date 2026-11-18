@@ -149,15 +149,24 @@ describe("SuiteClient federation handshake", () => {
 
     // Still the full pre-existing handshake, unchanged.
     expect(ci.product).toBe("claude_channel");
-    expect(ci.version).toBe("0.4.2");
+    expect(ci.version).toBe("0.4.3");
   });
 
   // The exact literal, isolated from the join plumbing, so a drift in the
   // constant is attributable without reading a socket trace. This is the
   // string core matches on; core's own copy is
   // `AgentRuntime.system_event_prompt_feature/0`.
-  test("CLIENT_INFO.features is exactly ['system_event_prompt']", () => {
-    expect(CLIENT_INFO.features).toEqual(["system_event_prompt"]);
+  test("CLIENT_INFO.features is exactly ['system_event_prompt', 'attention_ack']", () => {
+    expect(CLIENT_INFO.features).toEqual(["system_event_prompt", "attention_ack"]);
+  });
+
+  // `attention_ack` is the string core's `DeliveryQueue.ack_feature/0`
+  // returns and `DeliveryQueue.acks?/1` checks with `in` (core #228). Exact,
+  // like `system_event_prompt`: a variant ships an unrecognised claim and core
+  // silently stops redelivering.
+  test("declares 'attention_ack' byte-for-byte on join", () => {
+    const ci = joinClientInfo();
+    expect((ci.features as string[]).filter((f) => f === "attention_ack").length).toBe(1);
   });
 });
 

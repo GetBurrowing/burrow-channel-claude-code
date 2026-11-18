@@ -196,7 +196,7 @@ describe("src/index.ts env resolution, end to end", () => {
     // Raw literal, read off 0.3.1 (90e873fd) src/suite-client.ts CLIENT_INFO.
     expect(Object.keys(ci).sort()).toEqual(["build", "features", "product", "started_at", "version"]);
     expect(ci.product).toBe("claude_channel");
-    expect(ci.features).toEqual(["system_event_prompt"]);
+    expect(ci.features).toEqual(["system_event_prompt", "attention_ack"]);
   });
 });
 

@@ -125,11 +125,14 @@ const suite = new SuiteClient(
     token: BURROW_TOKEN,
   },
   {
-    onAttention: (payload) => {
-      void emitAttention(payload).catch((err) => {
+    // Returned, not voided: SuiteClient sends `attention_ack` only once this
+    // resolves (the notification reached Claude Code), and sends none when it
+    // rejects, so Burrow redelivers.
+    onAttention: (payload) =>
+      emitAttention(payload).catch((err) => {
         console.error(`${LOG_PREFIX} attention handler error:`, err);
-      });
-    },
+        throw err;
+      }),
     onDisconnect: () => {
       console.error(`${LOG_PREFIX} disconnected from Burrow`);
       // A burst caught mid-window must not wait for a reconnect that may

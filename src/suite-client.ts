@@ -3,6 +3,7 @@ import { Socket, Channel } from "phoenix";
 import WebSocket from "ws";
 import pkg from "../package.json" with { type: "json" };
 import { resetHistoryTracking } from "./attention.ts";
+import { AttentionDedupe } from "./attention-dedupe.ts";
 import { BUILD, BUILD_ERROR, PROCESS_STARTED_AT } from "./build-identity.ts";
 import { normaliseFrame } from "./meeting-transcript.ts";
 import type { MeetingTranscriptFrame } from "./meeting-transcript.ts";
@@ -58,7 +59,15 @@ import type { MeetingTranscriptFrame } from "./meeting-transcript.ts";
 // (`attention.ts`, the `payload.message?.content ?? payload.signal?.prompt`
 // fallback). Builds before `7288017` read `message.content` alone and
 // delivered every one of those as an empty <channel> tag.
-export const CLIENT_FEATURES = ["system_event_prompt"] as const;
+//
+// `attention_ack`: this build pushes `attention_ack {message_id}` for every
+// chat attention once it has handed the message to Claude Code, and drops a
+// redelivered `message_id` it has already shown (`attention-dedupe.ts`).
+// Core's `Platform.Federation.DeliveryQueue.acks?/1` reads this entry: with it,
+// an unacked message is redelivered on ack timeout or rejoin; without it,
+// core pushes once and never tracks delivery. Declaring it without the dedupe
+// would turn every redelivery into a duplicate turn.
+export const CLIENT_FEATURES = ["system_event_prompt", "attention_ack"] as const;
 
 export interface ClientInfo {
   product: "claude_channel";
@@ -172,7 +181,10 @@ export interface PermissionVerdict {
 }
 
 export interface SuiteHandlers {
-  onAttention: (payload: AttentionPayload) => void;
+  // Resolves once the attention has been handed to Claude Code (the MCP
+  // notification was sent). The `attention_ack` waits on it; a rejection
+  // sends no ack, so core redelivers.
+  onAttention: (payload: AttentionPayload) => void | Promise<void>;
   onDisconnect: () => void;
   // One final meeting transcript segment (`meeting_transcript` event). Typed
   // loosely on purpose: core may add keys, and a malformed frame must be
@@ -284,7 +296,10 @@ export class SuiteClient {
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private lastTrafficAt = Date.now();
   private stopped = false;
+  // Attentions WITHOUT a message_id (responsibility dispatches): ~1s bucket.
   private recentMessageIds = new Set<string>();
+  // Chat attentions, by message_id. Instance-scoped so it outlives reconnects.
+  private seenAttentions = new AttentionDedupe();
   // Replies waiting for the channel to (re)join. Resolved by `markJoined`.
   private joinWaiters = new Set<() => void>();
 
@@ -623,6 +638,74 @@ export class SuiteClient {
     });
   }
 
+  /**
+   * One inbound `attention` frame.
+   *
+   * With a `signal.message_id` (chat): deduped by id across reconnects, and
+   * acked with `attention_ack` once the handler has handed it to Claude Code,
+   * before the model works on it. A copy of an id already delivered is acked
+   * again and not shown; a copy of one still in flight is dropped (the first
+   * acks). A handler failure forgets the id and sends no ack, so core's
+   * redelivery gets through.
+   *
+   * Without one (responsibility dispatches): the ~1s identity bucket, as
+   * before. Core only tracks chat messages, so there is nothing to ack.
+   */
+  private receiveAttention(payload: AttentionPayload): void {
+    const messageId = payload?.signal?.message_id;
+
+    if (typeof messageId !== "string" || messageId.length === 0) {
+      const dedupeKey = `${attentionIdentity(payload)}:${Date.now() >> 10}`;
+      if (this.recentMessageIds.has(dedupeKey)) return;
+      this.recentMessageIds.add(dedupeKey);
+      if (this.recentMessageIds.size > 50) {
+        const first = this.recentMessageIds.values().next().value;
+        if (first) this.recentMessageIds.delete(first);
+      }
+      void Promise.resolve()
+        .then(() => this.handlers.onAttention(payload))
+        .catch((err) => log(`attention handler failed: ${err instanceof Error ? err.message : err}`));
+      return;
+    }
+
+    const seen = this.seenAttentions.get(messageId);
+    if (seen === "delivered") {
+      log(`attention ${messageId} redelivered; already shown, acking again`);
+      this.pushAttentionAck(messageId);
+      return;
+    }
+    if (seen === "pending") return;
+
+    this.seenAttentions.set(messageId, "pending");
+    Promise.resolve()
+      .then(() => this.handlers.onAttention(payload))
+      .then(
+        () => {
+          this.seenAttentions.set(messageId, "delivered");
+          this.pushAttentionAck(messageId);
+        },
+        (err) => {
+          this.seenAttentions.forget(messageId);
+          log(
+            `attention ${messageId} not handed to Claude Code (${err instanceof Error ? err.message : err}); no ack, Burrow will redeliver`,
+          );
+        },
+      );
+  }
+
+  /**
+   * Fire-and-forget: a lost ack only costs a redelivery, which the dedupe
+   * absorbs and re-acks. Pushed on the CURRENT channel, so an ack whose
+   * handler resolved across a reconnect goes out on the new connection.
+   */
+  private pushAttentionAck(messageId: string): void {
+    this.channel
+      ?.push("attention_ack", { message_id: messageId })
+      .receive("error", (payload: ReplyError) => {
+        log(`attention_ack ${messageId} refused: ${payload?.error ?? "unknown error"}`);
+      });
+  }
+
   private joinChannel(): void {
     if (!this.socket) return;
 
@@ -633,14 +716,7 @@ export class SuiteClient {
     });
 
     this.channel.on("attention", (payload: AttentionPayload) => {
-      const dedupeKey = `${attentionIdentity(payload)}:${Date.now() >> 10}`;
-      if (this.recentMessageIds.has(dedupeKey)) return;
-      this.recentMessageIds.add(dedupeKey);
-      if (this.recentMessageIds.size > 50) {
-        const first = this.recentMessageIds.values().next().value;
-        if (first) this.recentMessageIds.delete(first);
-      }
-      this.handlers.onAttention(payload);
+      this.receiveAttention(payload);
     });
 
     // Meeting transcript segments. No dedupe here: core guarantees one frame

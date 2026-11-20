@@ -13,15 +13,23 @@ When installed, Burrow attention events (new messages, task dispatches, etc.)
 arrive in your running Claude Code session as `<channel source="…" …>` tags
 (Claude Code sets `source` to the key the server is configured under in
 `.mcp.json`, `suite-channel` in the example below). Claude replies back
-through the channel via the `suite_reply`, `suite_reply_with_media`, and
-`suite_typing` tools.
+through the channel via the `burrow_reply`, `burrow_reply_with_media`,
+`burrow_reply_chunk` and `burrow_typing` tools.
+
+The pre-rename names `suite_reply`, `suite_reply_with_media`,
+`suite_reply_chunk` and `suite_typing` are still listed as **deprecated
+aliases**: each takes the same arguments and behaves identically to its
+`burrow_*` tool, so an agent started before the rename keeps working until it
+is restarted. New prompts and instructions should name only the `burrow_*`
+tools. If a permission allowlist names the tools explicitly, add the
+`mcp__<server-key>__burrow_*` names alongside the old ones before upgrading.
 
 This plugin **does not expose Burrow's tool surface** — tools live on the
 `/mcp` endpoint in core (see ADR 0034 in the `core` repository). Register
 that separately with:
 
 ```bash
-claude mcp add startup-suite --transport http https://<your-suite>/mcp \
+claude mcp add burrow --transport http https://<your-burrow>/mcp \
   --header "Authorization: Bearer <runtime_token>"
 ```
 
@@ -123,10 +131,10 @@ the plugin is vendored inside another repository) `build` is omitted and
 | Feature                   | Status | Notes                                                                 |
 | ------------------------- | ------ | --------------------------------------------------------------------- |
 | Attention → session       | ✅     | Posted as `<channel source="…" …>` with task/space meta             |
-| Reply (text)              | ✅     | `suite_reply` tool                                                    |
-| Reply with media          | ✅     | `suite_reply_with_media` tool, base64 attachments                     |
-| Typing indicator          | ✅     | `suite_typing` tool                                                   |
-| Reply chunks              | ✅     | `suite_reply_chunk` tool — cumulative-text progressive reveal          |
+| Reply (text)              | ✅     | `burrow_reply` tool (deprecated alias `suite_reply`)                  |
+| Reply with media          | ✅     | `burrow_reply_with_media` tool, base64 attachments                     |
+| Typing indicator          | ✅     | `burrow_typing` tool                                                   |
+| Reply chunks              | ✅     | `burrow_reply_chunk` tool — cumulative-text progressive reveal          |
 | Reply annotations         | ✅     | Optional `in_reply_to_message_id` + `context` on the reply tools      |
 | Permission relay          | ✅     | Opt-in via `BURROW_ALLOW_PERMISSION_RELAY=1`                           |
 | Presence                  | ✅     | Tracked by Burrow via the WebSocket connection                         |
@@ -137,8 +145,8 @@ the plugin is vendored inside another repository) `build` is omitted and
 
 ## Reply annotations
 
-`suite_reply`, `suite_reply_with_media` and the final (`done:true`)
-`suite_reply_chunk` accept two optional fields:
+`burrow_reply`, `burrow_reply_with_media` and the final (`done:true`)
+`burrow_reply_chunk` accept two optional fields:
 
 - `in_reply_to_message_id`: the `message_id` attribute of the channel tag the
   reply answers. Burrow links the reply to that message.
@@ -153,10 +161,10 @@ example `in_reply_to_message_id (not_found)`). Non-final chunks carry neither.
 
 Claude Code channel plugins can't observe Claude's raw token stream — only
 tool calls. For long replies that benefit from progressive reveal in Burrow,
-Claude should call `suite_reply_chunk` several times with a stable `chunk_id`,
+Claude should call `burrow_reply_chunk` several times with a stable `chunk_id`,
 passing the **cumulative** text each time and `done:true` on the final call.
 
-Short answers should keep using `suite_reply`. Chunking is for the kind of
+Short answers should keep using `burrow_reply`. Chunking is for the kind of
 multi-paragraph response where a single atomic drop feels jarring.
 
 **Persistence:** Burrow's `reply_chunk` is ephemeral (PubSub broadcast for the

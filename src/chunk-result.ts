@@ -1,5 +1,5 @@
 /**
- * Build the MCP tool result for a NON-FINAL `suite_reply_chunk` (done:false).
+ * Build the MCP tool result for a NON-FINAL `burrow_reply_chunk` (done:false).
  *
  * The chunk push is fire-and-forget, so this result cannot assert that THIS
  * chunk was delivered. Two honest shapes instead: a known prior refusal for

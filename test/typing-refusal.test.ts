@@ -1,6 +1,6 @@
 // Typing-refusal tests (task 01a09415, stage 4).
 //
-// `suite_typing` against a space the agent does not participate in returned
+// `burrow_typing` against a space the agent does not participate in returned
 // `isError=false` with the text "typing on": the refusal was logged to stderr
 // and nothing about it reached the MCP caller, so the result was
 // indistinguishable from the delivered case.
@@ -96,7 +96,7 @@ function joinedClient(): { client: any; channel: FakeChannel } {
   return { client, channel };
 }
 
-/** The tool-layer shape, mirroring src/index.ts case "suite_typing". */
+/** The tool-layer shape, mirroring src/index.ts case "burrow_typing". */
 function typingResult(
   client: any,
   spaceId: string,

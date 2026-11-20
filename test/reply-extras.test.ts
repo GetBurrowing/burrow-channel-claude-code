@@ -1,6 +1,6 @@
 // Reply-annotation forwarding tests (task 01a0d8de, stage 4).
 //
-// `suite_reply`, `suite_reply_with_media` and the FINAL `suite_reply_chunk`
+// `burrow_reply`, `burrow_reply_with_media` and the FINAL `burrow_reply_chunk`
 // forward two optional fields to core: `in_reply_to_message_id` and
 // `context`. The non-final chunk and the `reply_chunk` push never carry them.
 //
@@ -125,17 +125,17 @@ function recordingSuite(ack: Record<string, unknown> = { message_id: "msg-1" }) 
 const EXTRAS = { in_reply_to_message_id: MSG, context: CONTEXT };
 
 describe("the tool dispatcher forwards reply annotations", () => {
-  test("suite_reply passes both fields to sendReply", async () => {
+  test("burrow_reply passes both fields to sendReply", async () => {
     const { suite, calls } = recordingSuite();
-    await callTool(suite, "suite_reply", { space_id: SPACE, content: "hi", ...EXTRAS });
+    await callTool(suite, "burrow_reply", { space_id: SPACE, content: "hi", ...EXTRAS });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fn).toBe("sendReply");
     expect(calls[0]!.args).toEqual([SPACE, "hi", EXTRAS]);
   });
 
-  test("suite_reply_with_media passes both fields to sendReplyWithMedia", async () => {
+  test("burrow_reply_with_media passes both fields to sendReplyWithMedia", async () => {
     const { suite, calls } = recordingSuite();
-    await callTool(suite, "suite_reply_with_media", {
+    await callTool(suite, "burrow_reply_with_media", {
       space_id: SPACE,
       content: "see attached",
       attachments: [{ filename: "a.png", content_type: "image/png", data: "AAAA" }],
@@ -148,7 +148,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
 
   test("the final chunk forwards both fields into its persisting sendReply, and the chunk push carries none", async () => {
     const { suite, calls } = recordingSuite();
-    await callTool(suite, "suite_reply_chunk", {
+    await callTool(suite, "burrow_reply_chunk", {
       space_id: SPACE,
       chunk_id: "c1",
       text: "all of it",
@@ -162,7 +162,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
 
   test("a non-final chunk sends no persisting reply, so the annotations go nowhere", async () => {
     const { suite, calls } = recordingSuite();
-    await callTool(suite, "suite_reply_chunk", {
+    await callTool(suite, "burrow_reply_chunk", {
       space_id: SPACE,
       chunk_id: "c1",
       text: "partial",
@@ -175,7 +175,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
 
   test("omitted fields reach the client as undefined, not as empty strings", async () => {
     const { suite, calls } = recordingSuite();
-    await callTool(suite, "suite_reply", { space_id: SPACE, content: "hi" });
+    await callTool(suite, "burrow_reply", { space_id: SPACE, content: "hi" });
     expect(calls[0]!.args[2]).toEqual({ in_reply_to_message_id: undefined, context: undefined });
   });
 
@@ -184,7 +184,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
       message_id: "msg-9",
       dropped: [{ field: "in_reply_to_message_id", reason: "not_found" }],
     });
-    const result = await callTool(suite, "suite_reply", {
+    const result = await callTool(suite, "burrow_reply", {
       space_id: SPACE,
       content: "hi",
       ...EXTRAS,
@@ -196,12 +196,12 @@ describe("the tool dispatcher forwards reply annotations", () => {
 
   test("an ack without dropped reads as a plain receipt (positive control)", async () => {
     const { suite } = recordingSuite({ message_id: "msg-9" });
-    const result = await callTool(suite, "suite_reply", { space_id: SPACE, content: "hi" });
+    const result = await callTool(suite, "burrow_reply", { space_id: SPACE, content: "hi" });
     expect(result.content[0]!.text).toBe("sent (message_id msg-9)");
   });
 
   test("the three reply tools advertise both optional fields and require neither", () => {
-    for (const name of ["suite_reply", "suite_reply_with_media", "suite_reply_chunk"]) {
+    for (const name of ["burrow_reply", "burrow_reply_with_media", "burrow_reply_chunk"]) {
       const def = TOOL_DEFINITIONS.find((d) => d.name === name)!;
       const props = def.inputSchema.properties as Record<string, unknown>;
       expect(props).toHaveProperty("in_reply_to_message_id");
@@ -209,7 +209,7 @@ describe("the tool dispatcher forwards reply annotations", () => {
       expect(def.inputSchema.required).not.toContain("in_reply_to_message_id");
       expect(def.inputSchema.required).not.toContain("context");
     }
-    const typing = TOOL_DEFINITIONS.find((d) => d.name === "suite_typing")!;
+    const typing = TOOL_DEFINITIONS.find((d) => d.name === "burrow_typing")!;
     expect(typing.inputSchema.properties).not.toHaveProperty("context");
   });
 });

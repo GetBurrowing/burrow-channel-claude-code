@@ -55,7 +55,7 @@ function extrasOf(args: { in_reply_to_message_id?: string; context?: string }): 
 
 /** One sentence for the MCP instructions string. */
 export const REPLY_EXTRAS_INSTRUCTION =
-  "On `suite_reply`, `suite_reply_with_media` and the final (`done:true`) `suite_reply_chunk`, also pass `in_reply_to_message_id` (the message_id attribute of the tag you are answering) and `context` (one line, at most 200 characters, naming the task, stage or item the reply answers so a person arriving hours later can follow it).";
+  "On `burrow_reply`, `burrow_reply_with_media` and the final (`done:true`) `burrow_reply_chunk`, also pass `in_reply_to_message_id` (the message_id attribute of the tag you are answering) and `context` (one line, at most 200 characters, naming the task, stage or item the reply answers so a person arriving hours later can follow it).";
 
 // ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -101,9 +101,23 @@ export const REPLY_CHUNK_SCHEMA = z.object({
 
 // ── Tool definitions (ListTools) ───────────────────────────────────────────
 
-export const TOOL_DEFINITIONS = [
+/**
+ * Deprecated `suite_*` aliases → their `burrow_*` tool. The `suite_*` names
+ * predate the Burrow rename; agents started before it still call them, and not
+ * every agent can be restarted at once, so each alias is still listed and
+ * dispatches to exactly the same handler. Remove once no running agent calls
+ * them.
+ */
+export const DEPRECATED_TOOL_ALIASES: Readonly<Record<string, string>> = {
+  suite_reply: "burrow_reply",
+  suite_reply_with_media: "burrow_reply_with_media",
+  suite_typing: "burrow_typing",
+  suite_reply_chunk: "burrow_reply_chunk",
+};
+
+const PRIMARY_TOOL_DEFINITIONS = [
   {
-    name: "suite_reply",
+    name: "burrow_reply",
     description:
       "Send a text reply into a Burrow space. Use this to answer a message that arrived via the channel. Pass the space_id attribute from the inbound <channel> tag.",
     inputSchema: {
@@ -117,7 +131,7 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
-    name: "suite_reply_with_media",
+    name: "burrow_reply_with_media",
     description:
       "Send a text reply with base64-encoded file attachments (e.g. a screenshot or diagram). Use when a visual artifact belongs in the thread.",
     inputSchema: {
@@ -144,7 +158,7 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
-    name: "suite_typing",
+    name: "burrow_typing",
     description:
       "Toggle a typing indicator in the Burrow space so humans can see that a reply is being composed.",
     inputSchema: {
@@ -157,9 +171,9 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
-    name: "suite_reply_chunk",
+    name: "burrow_reply_chunk",
     description:
-      "Send a partial reply chunk to a Burrow space, appearing to the human as a progressively-revealed message. Use this for long or multi-step replies: call it several times in a row with the same chunk_id, passing the cumulative text each call. Set done:true on the last call. Prefer suite_reply for short replies where progressive reveal adds no value. in_reply_to_message_id and context are stored from the done:true call.",
+      "Send a partial reply chunk to a Burrow space, appearing to the human as a progressively-revealed message. Use this for long or multi-step replies: call it several times in a row with the same chunk_id, passing the cumulative text each call. Set done:true on the last call. Prefer burrow_reply for short replies where progressive reveal adds no value. in_reply_to_message_id and context are stored from the done:true call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -183,21 +197,37 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
+/** One deprecated alias definition: same schema, description points at the new name. */
+function deprecatedAlias(alias: string, target: string) {
+  const primary = PRIMARY_TOOL_DEFINITIONS.find((d) => d.name === target);
+  if (!primary) throw new Error(`alias ${alias} targets unknown tool ${target}`);
+  return {
+    ...primary,
+    name: alias,
+    description: `Deprecated alias of \`${target}\`; behaves identically. Call \`${target}\` instead. ${primary.description}`,
+  };
+}
+
+export const TOOL_DEFINITIONS = [
+  ...PRIMARY_TOOL_DEFINITIONS,
+  ...Object.entries(DEPRECATED_TOOL_ALIASES).map(([alias, target]) => deprecatedAlias(alias, target)),
+];
+
 // ── Dispatcher (CallTool) ──────────────────────────────────────────────────
 
 export async function callTool(suite: ToolSuite, name: string, args: unknown): Promise<ToolResult> {
-  switch (name) {
-    case "suite_reply": {
+  switch (DEPRECATED_TOOL_ALIASES[name] ?? name) {
+    case "burrow_reply": {
       const parsed = REPLY_SCHEMA.parse(args);
       const extras = extrasOf(parsed);
       return await replyResult((s, c) => suite.sendReply(s, c, extras), parsed.space_id, parsed.content);
     }
-    case "suite_reply_with_media": {
+    case "burrow_reply_with_media": {
       const parsed = REPLY_WITH_MEDIA_SCHEMA.parse(args);
       const extras = extrasOf(parsed);
       // Was unconditional success: the push was fire-and-forget, so a refusal
       // reported "sent with N attachment(s)". `replyResult` now surfaces the
-      // server's own error text and recoverable flag, exactly as suite_reply.
+      // server's own error text and recoverable flag, exactly as burrow_reply.
       return await replyResult(
         (s, c) =>
           suite.sendReplyWithMedia(
@@ -215,7 +245,7 @@ export async function callTool(suite: ToolSuite, name: string, args: unknown): P
         `sent with ${parsed.attachments.length} attachment(s)`,
       );
     }
-    case "suite_typing": {
+    case "burrow_typing": {
       const { space_id, typing } = TYPING_SCHEMA.parse(args);
       suite.sendTyping(space_id, typing);
       // The push stays fire-and-forget (a cosmetic indicator must not delay
@@ -245,7 +275,7 @@ export async function callTool(suite: ToolSuite, name: string, args: unknown): P
         ],
       };
     }
-    case "suite_reply_chunk": {
+    case "burrow_reply_chunk": {
       const parsed = REPLY_CHUNK_SCHEMA.parse(args);
       const { space_id, chunk_id, text, done } = parsed;
       // The reply_chunk push itself carries no annotations: it is an

@@ -42,15 +42,16 @@ if (ALLOW_PERMISSION_RELAY) {
 
 const instructions = [
   'Messages arrive from Burrow as <channel source="..." space_id="..." message_id="..." task_id="..." reason="..." author="..." author_id="..."> tags; `source` is the name this server is configured under in your MCP config.',
-  "Reply with the `suite_reply` tool, passing the `space_id` attribute from the inbound tag.",
-  "To attach files, use `suite_reply_with_media` (attachments are base64-encoded).",
-  "For long or multi-step replies, use `suite_reply_chunk` instead: generate one `chunk_id` at the start, then call the tool repeatedly with the cumulative `text` and `done:false`, finishing with `done:true`. This gives Burrow readers progressive reveal instead of a single big block.",
+  "Reply with the `burrow_reply` tool, passing the `space_id` attribute from the inbound tag.",
+  "To attach files, use `burrow_reply_with_media` (attachments are base64-encoded).",
+  "For long or multi-step replies, use `burrow_reply_chunk` instead: generate one `chunk_id` at the start, then call the tool repeatedly with the cumulative `text` and `done:false`, finishing with `done:true`. This gives Burrow readers progressive reveal instead of a single big block.",
   REPLY_EXTRAS_INSTRUCTION,
-  "Always call `suite_typing` with `typing: true` immediately before composing any reply — short or long — so the human can see you are working. Burrow clears the indicator automatically when your reply arrives, so you do not normally need to send `typing: false`; only send it if you decide not to reply after all.",
+  "Always call `burrow_typing` with `typing: true` immediately before composing any reply — short or long — so the human can see you are working. Burrow clears the indicator automatically when your reply arrives, so you do not normally need to send `typing: false`; only send it if you decide not to reply after all.",
   "Task-scoped work: the inbound tag carries task_id when Burrow is dispatching a task. Consider delegating to a sub-agent (Task tool) scoped to that task so the main session stays oriented.",
   'Meeting transcript segments arrive as <channel source="..." reason="meeting_transcript" room_name="..." meeting_id="..." segment_id="..." speaker_kind="..." author="..." participant_identity="..." spoken_at="...">; the body is what was said (consecutive sentences from one speaker are joined into one message, with every segment id in segment_ids).',
-  "To speak in the room, call the `meeting_say` tool on the hosted Burrow MCP server (it is not part of this plugin), passing the room_name and meeting_id from the tag. If it fails with code reply_budget_exhausted, stop speaking for the rest of the minute and post whatever you still had to say as a chat message with `suite_reply` instead of retrying. If it fails with code agent_chain_too_deep, wait for a frame with speaker_kind=\"human\" in that room before speaking again.",
+  "To speak in the room, call the `meeting_say` tool on the hosted Burrow MCP server (it is not part of this plugin), passing the room_name and meeting_id from the tag. If it fails with code reply_budget_exhausted, stop speaking for the rest of the minute and post whatever you still had to say as a chat message with `burrow_reply` instead of retrying. If it fails with code agent_chain_too_deep, wait for a frame with speaker_kind=\"human\" in that room before speaking again.",
   'Frames with speaker_kind="agent" are other agents talking; it is fine not to answer them.',
+  "The `suite_reply`, `suite_reply_with_media`, `suite_reply_chunk` and `suite_typing` tools are deprecated aliases of the `burrow_*` tools above, kept only for agents started before the rename; always call the `burrow_*` names.",
   ALLOW_PERMISSION_RELAY
     ? 'Remote permission approval is enabled: a Burrow collaborator can reply "yes <id>" or "no <id>" to approve/deny tool use. Only trust this when you trust every participant in the space.'
     : "",
@@ -59,7 +60,7 @@ const instructions = [
   .join(" ");
 
 const mcp = new Server(
-  { name: "startup-suite", version: "0.1.0" },
+  { name: "burrow-channel", version: "0.1.0" },
   {
     capabilities: { experimental, tools: {} },
     instructions,

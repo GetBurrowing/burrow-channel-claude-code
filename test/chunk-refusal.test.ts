@@ -1,6 +1,6 @@
 // Chunk-refusal tests (task 01a0ac1d, stage 1).
 //
-// `suite_reply_chunk` with done:false against a space the agent cannot write
+// `burrow_reply_chunk` with done:false against a space the agent cannot write
 // to returned "chunk … appended" isError=false: the refusal was logged to
 // stderr and recorded nowhere, so the tool layer had nothing to report.
 //
